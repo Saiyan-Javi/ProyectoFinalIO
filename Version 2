@@ -1,0 +1,599 @@
+import tkinter as tk
+from tkinter import messagebox, ttk
+from tkinter.simpledialog import askstring, askfloat
+import numpy as np
+from scipy.optimize import linprog
+import uuid # Aunque no se usa para IDs en esta versión, se mantiene el import
+import math
+
+# Clase para el diálogo de tipo de nodo personalizado (sin cambios relevantes aquí)
+class NodeTypeDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.transient(parent)
+        self.grab_set()
+        self.title("Tipo de Nodo")
+        self.result = None
+
+        parent_x = parent.winfo_x()
+        parent_y = parent.winfo_y()
+        parent_width = parent.winfo_width()
+        parent_height = parent.winfo_height()
+
+        dialog_width = 300
+        dialog_height = 120
+
+        x = parent_x + (parent_width // 2) - (dialog_width // 2)
+        y = parent_y + (parent_height // 2) - (dialog_height // 2)
+
+        self.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
+        self.resizable(False, False)
+
+        ttk.Label(self, text="¿Qué tipo de nodo quiere ingresar?", font=("Helvetica", 11)).pack(pady=15)
+
+        button_frame = ttk.Frame(self)
+        button_frame.pack(pady=5)
+
+        ttk.Button(button_frame, text="Oferta", command=self.select_supply).pack(side=tk.LEFT, padx=10)
+        ttk.Button(button_frame, text="Demanda", command=self.select_demand).pack(side=tk.LEFT, padx=10)
+
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+        self.wait_window(self)
+
+    def select_supply(self):
+        self.result = True
+        self.destroy()
+
+    def select_demand(self):
+        self.result = False
+        self.destroy()
+
+    def on_closing(self):
+        self.result = None
+        self.destroy()
+
+
+class TransportProblemGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Problema de Transporte")
+        self.nodes = []
+        self.edges = []
+        self.selected_node = None
+        self.solution_edges = []
+        self.node_counter = 0
+
+        self.style = ttk.Style()
+        self.style.configure("TButton", font=("Helvetica", 10), padding=5)
+        self.style.configure("TLabel", font=("Helvetica", 10))
+        self.style.configure("Accent.TButton", background="#4CAF50", foreground="white", font=("Helvetica", 10, "bold"))
+        self.style.map("Accent.TButton",
+                       background=[('active', '#66BB6A')],
+                       foreground=[('active', 'white')])
+
+        self.instruction_frame = ttk.Frame(root)
+        self.instruction_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(
+            self.instruction_frame,
+            text="1. Haz clic en el canvas para agregar nodos (oferta/demanda) y sus cantidades.\n"
+                 "2. Selecciona nodos por ID, ingresa el costo y conéctalos para formar la red.\n"
+                 "3. Haz clic en 'Resolver' para obtener la solución del problema de transporte/asignación.",
+            font=("Helvetica", 10, "italic"),
+            background="#f0f0f0",
+            justify=tk.LEFT
+        ).pack(padx=10, pady=5)
+
+        self.canvas = tk.Canvas(root, width=600, height=450, bg="#f0f0f0", highlightthickness=1, highlightbackground="#cccccc")
+        self.canvas.pack(pady=10)
+        self.canvas.bind("<Button-1>", self.add_node)
+
+        self.control_frame = ttk.LabelFrame(root, text="Controles", padding=10)
+        self.control_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        ttk.Label(self.control_frame, text="Costo de Arista:").grid(row=0, column=0, padx=5, pady=5)
+        self.cost_entry = ttk.Entry(self.control_frame)
+        self.cost_entry.grid(row=0, column=1, padx=5, pady=5)
+        self.cost_entry.insert(0, "0")
+
+        self.select_btn = ttk.Button(self.control_frame, text="Seleccionar Nodo", command=self.select_node)
+        self.select_btn.grid(row=1, column=0, columnspan=2, pady=5)
+
+        self.connect_btn = ttk.Button(self.control_frame, text="Conectar Nodos", command=self.connect_nodes)
+        self.connect_btn.grid(row=2, column=0, columnspan=2, pady=5)
+
+        self.solve_btn = ttk.Button(self.control_frame, text="Resolver", command=self.choose_problem_type, style="Accent.TButton")
+        self.solve_btn.grid(row=3, column=0, columnspan=2, pady=5)
+
+        self.clear_btn = ttk.Button(self.control_frame, text="Limpiar", command=self.clear_canvas)
+        self.clear_btn.grid(row=4, column=0, columnspan=2, pady=5)
+
+        self.create_tooltip(self.select_btn, "Selecciona un nodo ingresando su ID numérico.")
+        self.create_tooltip(self.connect_btn, "Conecta dos nodos")
+        self.create_tooltip(self.solve_btn, "Resuelve el problema de transporte.")
+        self.create_tooltip(self.clear_btn, "Limpia el canvas y empieza de nuevo.")
+
+    def create_tooltip(self, widget, text):
+        def show_tooltip(event):
+            x = widget.winfo_rootx() + 20
+            y = widget.winfo_rooty() + 20
+            self.tooltip = tk.Toplevel(widget)
+            self.tooltip.wm_overrideredirect(True)
+            self.tooltip.wm_geometry(f"+{x}+{y}")
+            label = tk.Label(self.tooltip, text=text, background="#ffffe0", relief="solid", borderwidth=1, font=("Helvetica", 8))
+            label.pack()
+
+        def hide_tooltip(event):
+            if hasattr(self, "tooltip"):
+                self.tooltip.destroy()
+
+        widget.bind("<Enter>", show_tooltip)
+        widget.bind("<Leave>", hide_tooltip)
+
+    def add_node(self, event):
+        x, y = event.x, event.y
+        self.node_counter += 1
+        node_id = str(self.node_counter)
+
+        dialog = NodeTypeDialog(self.root)
+        is_supply = dialog.result
+
+        if is_supply is None:
+            messagebox.showinfo("Información", "Creación de nodo cancelada")
+            self.node_counter -= 1
+            return
+
+        if is_supply:
+            supply = askfloat("Oferta", "Ingrese la oferta para este nodo:", parent=self.root, minvalue=0)
+            if supply is None:
+                messagebox.showinfo("Información", "Creación de nodo cancelada")
+                self.node_counter -= 1
+                return
+            demand = 0
+        else:
+            demand = askfloat("Demanda", "Ingrese la demanda para este nodo:", parent=self.root, minvalue=0)
+            if demand is None:
+                messagebox.showinfo("Información", "Creación de nodo cancelada")
+                self.node_counter -= 1
+                return
+            supply = 0
+
+        self.nodes.append({"id": node_id, "x": x, "y": y, "supply": supply, "demand": demand})
+        fill_color = "#90CAF9" if is_supply else "#EF9A9A"
+        self.canvas.create_oval(x-15, y-15, x+15, y+15, fill=fill_color, outline="#333333", width=2)
+        
+        self.canvas.create_text(x, y-25, text=node_id, fill="#333333", font=("Helvetica", 10, "bold")) 
+
+        if is_supply:
+            value_text = f"Oferta: {supply}"
+        else:
+            value_text = f"Demanda: {demand}"
+            
+        self.canvas.create_text(x, y+25, text=value_text, fill="#333333", font=("Helvetica", 9))
+        
+        text_width_approx = len(value_text) * 4 
+        rect_x1 = x - (text_width_approx / 2) - 5 
+        rect_x2 = x + (text_width_approx / 2) + 5 
+        
+        self.canvas.create_rectangle(
+            rect_x1, y+25-8, rect_x2, y+25+8, fill="#ffffff", outline="", stipple="gray50"
+        )
+        self.canvas.create_text(x, y+25, text=value_text, fill="#333333", font=("Helvetica", 9))
+
+
+    def clear_canvas(self):
+        self.canvas.delete("all")
+        self.nodes = []
+        self.edges = []
+        self.selected_node = None
+        self.solution_edges = []
+        self.node_counter = 0
+        messagebox.showinfo("Información", "Canvas limpiado. Puedes empezar de nuevo.")
+
+    def select_node(self):
+        node_id = askstring("Seleccionar Nodo", "Ingrese ID del nodo:", parent=self.root)
+        if node_id:
+            found = False
+            for node in self.nodes:
+                if node["id"] == node_id:
+                    self.selected_node = node
+                    messagebox.showinfo("Nodo Seleccionado", f"Nodo {node_id} seleccionado")
+                    found = True
+                    break
+            if not found:
+                messagebox.showerror("Error", "Nodo no encontrado")
+        else:
+            messagebox.showinfo("Información", "Selección cancelada")
+
+    def connect_nodes(self):
+        if not self.selected_node:
+            messagebox.showerror("Error", "Seleccione un nodo primero")
+            return
+        node2_id = askstring("Conectar Nodo", "Ingrese ID del nodo destino:", parent=self.root)
+        if not node2_id:
+            messagebox.showinfo("Información", "Conexión cancelada")
+            return
+        try:
+            cost = float(self.cost_entry.get() or 0)
+        except ValueError:
+            messagebox.showerror("Error", "Ingrese un costo numérico válido")
+            return
+
+        for node2 in self.nodes:
+            if node2["id"] == node2_id:
+                # Ensure connection is from supply to demand
+                if self.selected_node["supply"] == 0 and node2["demand"] == 0:
+                    messagebox.showerror("Error", "Debe conectar un nodo de oferta a un nodo de demanda. Ambos nodos son de demanda.")
+                    return
+                if self.selected_node["demand"] > 0 and node2["supply"] > 0:
+                    messagebox.showerror("Error", "Debe conectar un nodo de oferta a un nodo de demanda. Ambos nodos son de oferta.")
+                    return
+                if self.selected_node["demand"] > 0 and node2["demand"] > 0:
+                    messagebox.showerror("Error", "Debe conectar un nodo de oferta a un nodo de demanda. Ambos nodos son de demanda.")
+                    return
+                if self.selected_node["supply"] > 0 and node2["supply"] > 0:
+                    messagebox.showerror("Error", "Debe conectar un nodo de oferta a un nodo de demanda. Ambos nodos son de oferta.")
+                    return
+
+                if (self.selected_node["supply"] > 0 and node2["supply"] > 0) or \
+                   (self.selected_node["demand"] > 0 and node2["demand"] > 0):
+                    messagebox.showerror("Error", "Debe conectar un nodo de oferta a un nodo de demanda.")
+                    return
+
+                if self.selected_node["demand"] > 0 and node2["supply"] > 0:
+                    messagebox.showerror("Error", "La conexión debe ser de un nodo de oferta a uno de demanda.")
+                    return
+
+                if any(e["from"] == self.selected_node["id"] and e["to"] == node2["id"] for e in self.edges):
+                    messagebox.showwarning("Advertencia", "Ya existe una arista entre estos nodos.")
+                    self.selected_node = None
+                    return
+
+                edge = {
+                    "from": self.selected_node["id"],
+                    "to": node2["id"],
+                    "cost": cost,
+                    "line_id": None,
+                    "text_id": None,
+                    "rect_id": None
+                }
+                self.edges.append(edge)
+                line_id = self.canvas.create_line(
+                    self.selected_node["x"], self.selected_node["y"],
+                    node2["x"], node2["y"],
+                    arrow=tk.LAST, fill="#666666", width=2
+                )
+                edge["line_id"] = line_id
+
+                x1, y1 = self.selected_node["x"], self.selected_node["y"]
+                x2, y2 = node2["x"], node2["y"]
+                mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
+                dx, dy = x2 - x1, y2 - y1
+                length = math.sqrt(dx**2 + dy**2)
+                
+                offset = 35 
+                
+                if length != 0:
+                    dx, dy = dx / length, dy / length
+                perp_dx, perp_dy = -dy, dx 
+                
+                text_x = mid_x + perp_dx * offset
+                text_y = mid_y + perp_dy * offset
+
+                text_x = max(30, min(text_x, self.canvas.winfo_width() - 30))
+                text_y = max(30, min(text_y, self.canvas.winfo_height() - 30))
+
+                rect_id = self.canvas.create_rectangle(
+                    text_x-15, text_y-8, text_x+15, text_y+8,
+                    fill="#ffffff", outline="", stipple="gray50"
+                )
+                text_id = self.canvas.create_text(
+                    text_x, text_y,
+                    text=str(cost), fill="#333333", font=("Helvetica", 9)
+                )
+                edge["rect_id"] = rect_id
+                edge["text_id"] = text_id
+                break
+        else:
+            messagebox.showerror("Error", "Nodo destino no encontrado")
+            return
+        self.selected_node = None
+
+    def choose_problem_type(self):
+        try:
+            problem_type = messagebox.askyesno(
+                "Seleccionar Tipo de Problema",
+                "¿Desea resolver un Problema de Asignación? (Sí = Asignación, No = Transporte)",
+                parent=self.root
+            )
+            if problem_type:
+                self.solve_assignment()
+            else:
+                self.solve_transport()
+        except tk.TclError as e:
+            messagebox.showerror("Error", f"No se pudo mostrar el cuadro de diálogo: {e}\nSe usará el método de Transporte por defecto.")
+            self.solve_transport()
+
+    def solve_assignment(self):
+        supply_nodes = [n for n in self.nodes if n["supply"] > 0]
+        demand_nodes = [n for n in self.nodes if n["demand"] > 0]
+
+        if not supply_nodes or not demand_nodes:
+            messagebox.showerror("Error", "Debe haber al menos un nodo de oferta y uno de demanda para resolver el problema.")
+            return
+
+        if len(supply_nodes) != len(demand_nodes):
+            messagebox.showerror("Error", "El número de nodos de oferta y demanda debe ser igual para un problema de asignación.")
+            return
+
+        for edge in self.edges:
+            self.canvas.itemconfig(edge["line_id"], fill="#666666", width=2)
+        self.solution_edges = []
+
+        temp_supply_values = {s["id"]: s["supply"] for s in supply_nodes}
+        temp_demand_values = {d["id"]: d["demand"] for d in demand_nodes}
+
+        for s in supply_nodes:
+            s["supply"] = 1
+        for d in demand_nodes:
+            d["demand"] = 1
+
+        m = len(supply_nodes)
+        n = len(demand_nodes)
+
+        c = []
+        A_eq = []
+        b_eq = []
+
+        result_text = "Función Objetivo (Asignación):\nMin Z = "
+        cost_terms = []
+        # MODIFICACIÓN: Usar IDs de nodo para nombres de variables
+        for i, s in enumerate(supply_nodes):
+            for j, d in enumerate(demand_nodes):
+                cost = next((e["cost"] for e in self.edges if e["from"] == s["id"] and e["to"] == d["id"]), None)
+                if cost is None:
+                    messagebox.showerror("Error", f"Falta la arista de {s['id']} a {d['id']}. Todas las conexiones deben existir.")
+                    for s_node in supply_nodes: s_node["supply"] = temp_supply_values[s_node["id"]]
+                    for d_node in demand_nodes: d_node["demand"] = temp_demand_values[d_node["id"]]
+                    return
+                c.append(cost)
+                cost_terms.append(f"{cost}*x_{s['id']}{d['id']}") # Usar IDs de nodo
+        result_text += " + ".join(cost_terms) + "\n\n"
+
+        result_text += "Restricciones de Agentes (suma por fila = 1):\n"
+        for i, s in enumerate(supply_nodes): # Iterar sobre nodos para obtener ID
+            row = [0] * (m * n)
+            for j in range(n):
+                row[i * n + j] = 1
+            A_eq.append(row)
+            b_eq.append(1)
+            terms = [f"x_{s['id']}{demand_nodes[j]['id']}" for j in range(n)] # Usar IDs de nodo
+            result_text += f"{' + '.join(terms)} = 1 (Agente {s['id']})\n" # Usar ID real
+            
+        result_text += "\nRestricciones de Tareas (suma por columna = 1):\n"
+        for j, d in enumerate(demand_nodes): # Iterar sobre nodos para obtener ID
+            row = [0] * (m * n)
+            for i in range(m):
+                row[i * n + j] = 1
+            A_eq.append(row)
+            b_eq.append(1)
+            terms = [f"x_{supply_nodes[i]['id']}{d['id']}" for i in range(m)] # Usar IDs de nodo
+            result_text += f"{' + '.join(terms)} = 1 (Tarea {d['id']})\n" # Usar ID real
+
+        result_text += "\nRestricciones de Asignación:\n"
+        # MODIFICACIÓN: Usar IDs de nodo para nombres de variables
+        result_text += ", ".join([f"x_{s['id']}{d['id']} ∈ {{0, 1}}" for s in supply_nodes for d in demand_nodes]) + "\n\n"
+
+        res = linprog(c, A_eq=A_eq, b_eq=b_eq, bounds=(0, 1), method="highs")
+
+        if res.success:
+            solution = np.where(res.x > 0.5, 1, 0).reshape(m, n)
+            result_text += "Solución Óptima (Asignación):\n"
+            total_cost = 0
+            for i, s in enumerate(supply_nodes):
+                for j, d in enumerate(demand_nodes):
+                    if solution[i][j] == 1:
+                        cost = c[i * n + j]
+                        result_text += f"Agente {s['id']} asignado a Tarea {d['id']}: costo {cost}\n"
+                        total_cost += cost
+                        edge = next((e for e in self.edges if e["from"] == s["id"] and e["to"] == d["id"]), None)
+                        if edge and edge["line_id"]:
+                            self.canvas.itemconfig(edge["line_id"], fill="#4CAF50", width=3)
+                            self.solution_edges.append(edge)
+            result_text += f"Costo Total: {total_cost}\n"
+            messagebox.showinfo("Resultado del Problema de Asignación", result_text)
+        else:
+            messagebox.showerror("Error", f"No se pudo encontrar una solución óptima para el problema de asignación: {res.message}")
+
+        for s_node in supply_nodes:
+            s_node["supply"] = temp_supply_values[s_node["id"]]
+        for d_node in demand_nodes:
+            d_node["demand"] = temp_demand_values[d_node["id"]]
+
+    def solve_transport(self):
+        supply_nodes = [n for n in self.nodes if n["supply"] > 0]
+        demand_nodes = [n for n in self.nodes if n["demand"] > 0]
+
+        if not supply_nodes or not demand_nodes:
+            messagebox.showerror("Error", "Debe haber al menos un nodo de oferta y uno de demanda para resolver el problema.")
+            return
+
+        for edge in self.edges:
+            self.canvas.itemconfig(edge["line_id"], fill="#666666", width=2)
+        self.solution_edges = []
+
+        total_supply = sum(n["supply"] for n in supply_nodes)
+        total_demand = sum(n["demand"] for n in demand_nodes)
+
+        original_supply_ids = {n["id"] for n in supply_nodes}
+        original_demand_ids = {n["id"] for n in demand_nodes}
+
+        fictitious_supply_node = None
+        fictitious_demand_node = None
+
+        # --- Manejo de nodos ficticios ---
+        added_fictitious_edges = [] # Para limpiar las aristas ficticias si hay un error
+
+        if total_supply < total_demand:
+            shortfall = total_demand - total_supply
+            fict_node_id = "Ficticio_Oferta" # Usar un ID descriptivo
+            fictitious_supply_node = {
+                "id": fict_node_id,
+                "x": 0, "y": 0, # Coordenadas ficticias
+                "supply": shortfall,
+                "demand": 0
+            }
+            supply_nodes.append(fictitious_supply_node)
+            messagebox.showwarning(
+                "Advertencia",
+                f"La oferta total ({total_supply}) es menor que la demanda total ({total_demand}). "
+                f"Se agregó un nodo ficticio de oferta con {shortfall} unidades para balancear."
+            )
+            for d in demand_nodes:
+                new_edge = {
+                    "from": fict_node_id,
+                    "to": d["id"],
+                    "cost": 1000000, # Gran penalización
+                    "line_id": None, "text_id": None, "rect_id": None
+                }
+                self.edges.append(new_edge)
+                added_fictitious_edges.append(new_edge) # Guardar referencia
+        elif total_supply > total_demand:
+            excess = total_supply - total_demand
+            fict_node_id = "Ficticio_Demanda" # Usar un ID descriptivo
+            fictitious_demand_node = {
+                "id": fict_node_id,
+                "x": 0, "y": 0, # Coordenadas ficticias
+                "supply": 0,
+                "demand": excess
+            }
+            demand_nodes.append(fictitious_demand_node)
+            messagebox.showwarning(
+                "Advertencia",
+                f"La oferta total ({total_supply}) es mayor que la demanda total ({total_demand}). "
+                f"Se agregó un nodo ficticio de demanda con {excess} unidades para balancear."
+            )
+            for s in supply_nodes:
+                new_edge = {
+                    "from": s["id"],
+                    "to": fict_node_id,
+                    "cost": 0, # Cero costo para exceso no utilizado
+                    "line_id": None, "text_id": None, "rect_id": None
+                }
+                self.edges.append(new_edge)
+                added_fictitious_edges.append(new_edge) # Guardar referencia
+
+        m, n = len(supply_nodes), len(demand_nodes)
+        c = []
+        A_eq = []
+        b_eq = []
+        A_ub = []
+        b_ub = []
+
+        result_text = "Función Objetivo:\nMin Z = "
+        cost_terms = []
+        # MODIFICACIÓN: Usar IDs de nodo para nombres de variables
+        for i, s in enumerate(supply_nodes):
+            for j, d in enumerate(demand_nodes):
+                cost = next((e["cost"] for e in self.edges if e["from"] == s["id"] and e["to"] == d["id"]), None)
+                if cost is None:
+                    messagebox.showerror("Error", f"Falta la arista de {s['id']} a {d['id']}. Todas las conexiones deben existir.")
+                    # Limpiar nodos y aristas ficticias si hubo un error en la creación de costos
+                    if fictitious_supply_node: supply_nodes.pop()
+                    if fictitious_demand_node: demand_nodes.pop()
+                    # Eliminar solo las aristas que se agregaron ficticiamente
+                    for fict_edge in added_fictitious_edges:
+                        if fict_edge in self.edges:
+                            self.edges.remove(fict_edge)
+                    return
+                c.append(cost)
+                cost_terms.append(f"{cost}*x_{s['id']}{d['id']}") # Usar IDs de nodo
+        result_text += " + ".join(cost_terms) + "\n\n"
+
+        result_text += "Restricciones de Oferta (≤):\n"
+        for i, s in enumerate(supply_nodes):
+            row = [0] * (m * n)
+            terms = [] # Reiniciar términos para cada restricción
+            for j, d in enumerate(demand_nodes): # Iterar sobre nodos de demanda para obtener ID
+                row[i * n + j] = 1
+                terms.append(f"x_{s['id']}{d['id']}") # Usar IDs de nodo
+            A_ub.append(row)
+            b_ub.append(s["supply"])
+            node_name = f"Planta {s['id']}" if s['id'] in original_supply_ids else "Planta Ficticia"
+            result_text += f"{' + '.join(terms)} ≤ {s['supply']} ({node_name})\n"
+
+        result_text += "\nRestricciones de Demanda (=):\n"
+        for j, d in enumerate(demand_nodes):
+            row = [0] * (m * n)
+            terms = [] # Reiniciar términos para cada restricción
+            for i, s in enumerate(supply_nodes): # Iterar sobre nodos de oferta para obtener ID
+                row[i * n + j] = 1
+                terms.append(f"x_{s['id']}{d['id']}") # Usar IDs de nodo
+            A_eq.append(row)
+            b_eq.append(d["demand"])
+            node_name = f"Comprador {d['id']}" if d['id'] in original_demand_ids else "Comprador Ficticio"
+            result_text += f"{' + '.join(terms)} = {d['demand']} ({node_name})\n"
+
+        result_text += "\nRestricciones de No Negatividad:\n"
+        # MODIFICACIÓN: Usar IDs de nodo para nombres de variables
+        result_text += ", ".join([f"x_{s['id']}{d['id']} ≥ 0" for s in supply_nodes for d in demand_nodes]) + "\n\n"
+
+        res = linprog(c, A_eq=A_eq, b_eq=b_eq, A_ub=A_ub, b_ub=b_ub, bounds=(0, None), method="highs")
+
+        if res.success:
+            solution = res.x.reshape(m, n)
+            result_text += "Solución Óptima:\n"
+            total_cost = 0
+            used_fictitious_supply = False
+            used_fictitious_demand = False
+
+            for i, s in enumerate(supply_nodes):
+                for j, d in enumerate(demand_nodes):
+                    if solution[i][j] > 1e-9: # Considerar valores muy cercanos a cero como cero
+
+                        is_fictitious_s = (fictitious_supply_node and s["id"] == fictitious_supply_node["id"])
+                        is_fictitious_d = (fictitious_demand_node and d["id"] == fictitious_demand_node["id"])
+
+                        cost = c[i * n + j]
+
+                        if is_fictitious_s:
+                            result_text += f"Demanda insatisfecha para {d['id']}: {solution[i][j]:.2f} unidades (costo de penalización)\n"
+                            used_fictitious_supply = True
+                        elif is_fictitious_d:
+                            result_text += f"Exceso de oferta de {s['id']}: {solution[i][j]:.2f} unidades no utilizadas\n"
+                            used_fictitious_demand = True
+                        else:
+                            result_text += f"De {s['id']} a {d['id']}: {solution[i][j]:.2f} unidades, costo: {cost * solution[i][j]:.2f}\n"
+                            edge = next((e for e in self.edges if e["from"] == s["id"] and e["to"] == d["id"]), None)
+                            if edge and edge["line_id"]:
+                                self.canvas.itemconfig(edge["line_id"], fill="#4CAF50", width=3)
+                                self.solution_edges.append(edge)
+                        total_cost += cost * solution[i][j]
+
+            result_text += f"Costo Total: {total_cost:.2f}\n"
+            if used_fictitious_supply:
+                result_text += "Nota: Se usó un nodo ficticio de oferta, indicando que no se pudo satisfacer toda la demanda."
+            if used_fictitious_demand:
+                result_text += "Nota: Se usó un nodo ficticio de demanda, indicando que hay exceso de oferta."
+
+            messagebox.showinfo("Resultado del Problema de Transporte", result_text)
+        else:
+            messagebox.showerror("Error", f"No se pudo encontrar una solución óptima para el problema de transporte: {res.message}")
+
+        # Limpiar nodos y aristas ficticias después de la resolución
+        # Eliminar las aristas ficticias del listado de aristas
+        for fict_edge in added_fictitious_edges:
+            if fict_edge in self.edges:
+                self.edges.remove(fict_edge)
+
+        # Eliminar los nodos ficticios de las listas temporales
+        if fictitious_supply_node and fictitious_supply_node in supply_nodes:
+            supply_nodes.remove(fictitious_supply_node)
+        if fictitious_demand_node and fictitious_demand_node in demand_nodes:
+            demand_nodes.remove(fictitious_demand_node)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TransportProblemGUI(root)
+    root.mainloop()
